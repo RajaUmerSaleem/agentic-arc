@@ -1,0 +1,6 @@
+{
+  "name": "Arc Agentic Task Swarm",
+  "description": "Autonomous AI agents paying each other for sub-tasks on the Arc blockchain using Circle Nanopayments and the x402 standard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
