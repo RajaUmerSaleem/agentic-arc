@@ -241,6 +241,8 @@ export default function App() {
       const data = await res.json();
       if (data.success) {
         addMessage('System', '✅ Circle engine registered! Save the recovery file from server logs.');
+      } else if (data.demo) {
+        addMessage('System', `⚠️ ${data.info || 'Hackathon demo mode active.'} You can still create demo wallets or run the swarm without real Circle integration.`);
       } else {
         setWalletError(data.error || 'Registration failed');
       }

@@ -238,6 +238,14 @@ async function startServer() {
       if (msg.includes('malformed API key')) {
         return res.json({ success: false, error: msg, demo: true, info: 'Your Circle key is in the old format. Hackathon demo mode active.' });
       }
+      if (msg.includes('Invalid credentials')) {
+        return res.json({
+          success: false,
+          error: 'Invalid credentials: Entity Secret may already be registered, or API key / IP allowlist mismatch.',
+          demo: true,
+          info: 'Skip registration and try creating a wallet directly. If that also fails, the app will use demo mode for the hackathon.'
+        });
+      }
       console.error('[REGISTER]', err);
       return res.status(500).json({ success: false, error: msg || 'Registration failed' });
     }
