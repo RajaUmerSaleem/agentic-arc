@@ -12,13 +12,28 @@ dotenv.config({ path: '.env.local', override: true });
 
 // Circle SDK client helper (returns null if config is empty/placeholder)
 // Note: old keys like "HACKATON_ENGINE" may work with @circle-fin/developer-controlled-wallets SDK
+let circleClientInstance: any = null;
+let circleClientError: string | null = null;
+
 function getCircleClient() {
   const apiKey = process.env.CIRCLE_API_KEY?.trim() || '';
   const entitySecret = process.env.ENTITY_SECRET?.trim() || '';
   const hasKey = apiKey.length > 0 && apiKey !== 'MY_CIRCLE_API_KEY' && apiKey !== 'YOUR_CIRCLE_API_KEY';
   const hasSecret = entitySecret.length > 0 && entitySecret !== 'MY_ENTITY_SECRET' && entitySecret !== 'YOUR_ENTITY_SECRET';
   if (!hasKey || !hasSecret) return null;
-  return initiateDeveloperControlledWalletsClient({ apiKey, entitySecret });
+
+  // Return cached instance if available
+  if (circleClientInstance) return circleClientInstance;
+  if (circleClientError) return null;
+
+  try {
+    circleClientInstance = initiateDeveloperControlledWalletsClient({ apiKey, entitySecret });
+    return circleClientInstance;
+  } catch (err: any) {
+    circleClientError = err?.message || 'Failed to initialize Circle client';
+    console.error('[Circle SDK Init Error]', circleClientError);
+    return null;
+  }
 }
 
 async function startServer() {
@@ -255,6 +270,10 @@ async function startServer() {
   app.get("/api/wallets", async (req, res) => {
     const client = getCircleClient();
     if (!client) {
+      // Client init failed or not configured — return demo mode gracefully
+      if (circleClientError) {
+        return res.json({ success: false, error: circleClientError, demo: true, info: 'Circle SDK initialization failed. Hackathon demo mode active.' });
+      }
       return res.json({ success: false, error: 'Circle SDK not configured', demo: true, info: 'Hackathon demo mode: create a wallet to see simulated addresses.' });
     }
     try {
