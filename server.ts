@@ -285,8 +285,8 @@ async function startServer() {
       });
     } catch (err: any) {
       const msg = err?.message || '';
-      if (msg.includes('malformed API key')) {
-        return res.json({ success: false, error: msg, demo: true, info: 'Your Circle key is in the old format. Hackathon demo mode active.' });
+      if (msg.includes('malformed API key') || msg.includes('Invalid credentials')) {
+        return res.json({ success: false, error: msg, demo: true, info: 'Circle credentials invalid (API key format, entity secret, or IP mismatch). Hackathon demo mode active.' });
       }
       console.error('[WALLETS LIST]', err);
       return res.status(500).json({ success: false, error: msg || 'Failed to list wallets' });
@@ -320,7 +320,7 @@ async function startServer() {
       });
     } catch (err: any) {
       const msg = err?.message || '';
-      if (msg.includes('malformed API key')) {
+      if (msg.includes('malformed API key') || msg.includes('Invalid credentials')) {
         // Return a simulated demo wallet so the UI still works
         const demoAddress = '0x' + Array.from({length: 40}, () => Math.floor(Math.random() * 16).toString(16)).join('');
         return res.json({
@@ -328,7 +328,7 @@ async function startServer() {
           demo: true,
           wallet: { id: 'demo-' + Date.now(), address: demoAddress, blockchain, state: 'DEMO' },
           address: demoAddress,
-          info: 'Hackathon demo wallet (Circle key needs ENV:ID:SECRET format)'
+          info: 'Hackathon demo wallet (Circle credentials invalid — API key, entity secret, or IP mismatch)'
         });
       }
       console.error('[WALLET CREATE]', err);
