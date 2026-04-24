@@ -36,6 +36,67 @@ function getCircleClient() {
   }
 }
 
+const FINAL_SUCCESS_STATES = new Set(["CONFIRMED", "COMPLETE"]);
+const FINAL_FAILURE_STATES = new Set(["FAILED", "DENIED", "CANCELLED"]);
+
+function isValidEvmAddress(address: string): boolean {
+  return /^0x[a-fA-F0-9]{40}$/.test(address);
+}
+
+function isExactNanopayment(amount: number): boolean {
+  return Math.abs(amount - 0.005) < 1e-9;
+}
+
+async function resolveArcUsdcTokenId(client: any, walletId: string): Promise<string> {
+  const balanceRes = await client.getWalletTokenBalance({
+    id: walletId,
+    includeAll: true
+  });
+
+  const tokenBalances = balanceRes?.data?.tokenBalances || [];
+  const usdcOnArc = tokenBalances.find((b: any) => {
+    const symbol = String(b?.token?.symbol || "").toUpperCase();
+    const chain = String(b?.token?.blockchain || "").toUpperCase();
+    return symbol === "USDC" && chain === "ARC-TESTNET";
+  });
+
+  const tokenId = usdcOnArc?.token?.id;
+  if (!tokenId) {
+    throw new Error("USDC token not found for this wallet on ARC-TESTNET. Fund wallet with ARC testnet USDC first.");
+  }
+
+  return tokenId;
+}
+
+async function waitForFinalTransaction(client: any, txId: string, timeoutMs = 60000, pollMs = 1500): Promise<any> {
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const txRes = await client.getTransaction({ id: txId });
+    const tx = txRes?.data?.transaction;
+    const state = String(tx?.state || "");
+
+    if (FINAL_SUCCESS_STATES.has(state)) {
+      return tx;
+    }
+
+    if (FINAL_FAILURE_STATES.has(state)) {
+      const reason = tx?.errorReason || "Circle transfer failed";
+      const details = tx?.errorDetails ? " | " + tx.errorDetails : "";
+      throw new Error(reason + details);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+
+  throw new Error("Timed out waiting for Circle transaction finalization.");
+}
+
+function isCircleSandboxKey(apiKey?: string): boolean {
+  const key = (apiKey || '').trim().toUpperCase();
+  return key.startsWith('TEST_API_KEY:') || key.startsWith('TEST_') || key.startsWith('Q_');
+}
+
 async function startServer() {
   const app = express();
   const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -51,47 +112,76 @@ async function startServer() {
   app.get("/api/config", async (req, res) => {
     const walletId = (process.env.CIRCLE_WALLET_ID || process.env.CIRCLE_WALLET_ADDRESS || "PENDING_CONFIG");
     const isAddress = walletId.startsWith('0x');
-    const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY;
+    const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY?.trim() || '';
+    const environment = CIRCLE_API_KEY ? (isCircleSandboxKey(CIRCLE_API_KEY) ? 'sandbox' : 'production') : 'unconfigured';
     
     let balance = "0.00";
-    let balanceDetails = null;
+    let balanceDetails: any = null;
+    let balanceSource: 'sdk' | 'rest' | 'none' = 'none';
 
-    if (CIRCLE_API_KEY && walletId !== "PENDING_CONFIG" && !isAddress) {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout
-      
+    if (walletId !== "PENDING_CONFIG" && !isAddress) {
+      const client = getCircleClient();
+
       try {
-        const isSandbox = CIRCLE_API_KEY?.startsWith('Q_');
-        const baseUrl = isSandbox ? 'https://api-sandbox.circle.com' : 'https://api.circle.com';
-        
-        const headers: Record<string, string> = {
-          'Authorization': `Bearer ${CIRCLE_API_KEY}`,
-          'Accept': 'application/json',
-          'Content-Type': 'application/json'
-        };
-        
-        // Fetch balance from Circle using the correct environment URL
-        const balanceRes = await fetch(`${baseUrl}/v1/wallets/${walletId}/balances`, { 
-          headers,
-          signal: controller.signal as any
-        });
-        const text = await balanceRes.text();
-        clearTimeout(timeoutId);
-        let balanceData;
-        try {
-          balanceData = JSON.parse(text);
-        } catch (e) {
-          console.error("Circle Balance Parse Error:", text);
-          throw new Error("Invalid response from Circle balance API");
-        }
-        
-        if (balanceRes.ok && balanceData.data && Array.isArray(balanceData.data) && balanceData.data[0]) {
-          balance = balanceData.data[0].amount;
-          balanceDetails = balanceData.data;
+        // Primary path: Circle SDK (works with Developer-Controlled Wallets and Entity Secret signing setup)
+        if (client) {
+          const sdkBalance = await client.getWalletTokenBalance({ id: walletId, includeAll: true });
+          const tokenBalances = sdkBalance?.data?.tokenBalances || [];
+          const usdcOnArc = tokenBalances.find((b: any) => {
+            const symbol = String(b?.token?.symbol || '').toUpperCase();
+            const chain = String(b?.token?.blockchain || '').toUpperCase();
+            return symbol === 'USDC' && chain === 'ARC-TESTNET';
+          });
+          const preferred = usdcOnArc || tokenBalances[0];
+          if (preferred?.amount) balance = preferred.amount;
+          balanceDetails = tokenBalances;
+          balanceSource = 'sdk';
+        } else if (CIRCLE_API_KEY) {
+          // Fallback path: direct REST call to W3S endpoint
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 8000);
+          try {
+            const baseUrl = environment === 'sandbox' ? 'https://api-sandbox.circle.com' : 'https://api.circle.com';
+            const headers: Record<string, string> = {
+              'Authorization': `Bearer ${CIRCLE_API_KEY}`,
+              'Accept': 'application/json',
+              'Content-Type': 'application/json'
+            };
+            const balanceRes = await fetch(`${baseUrl}/v1/w3s/wallets/${walletId}/balances`, {
+              headers,
+              signal: controller.signal as any
+            });
+            const text = await balanceRes.text();
+            let balanceData: any;
+            try {
+              balanceData = JSON.parse(text);
+            } catch (e) {
+              console.error("Circle Balance Parse Error:", text);
+              throw new Error("Invalid response from Circle balance API");
+            }
+
+            const tokenBalances = balanceData?.data?.tokenBalances || [];
+            const usdcOnArc = tokenBalances.find((b: any) => {
+              const symbol = String(b?.token?.symbol || '').toUpperCase();
+              const chain = String(b?.token?.blockchain || '').toUpperCase();
+              return symbol === 'USDC' && chain === 'ARC-TESTNET';
+            });
+            const preferred = usdcOnArc || tokenBalances[0];
+            if (preferred?.amount) balance = preferred.amount;
+            balanceDetails = tokenBalances;
+            balanceSource = 'rest';
+          } finally {
+            clearTimeout(timeoutId);
+          }
         }
       } catch (err) {
         console.error("Balance fetch error:", err);
-        balanceDetails = { error: err instanceof Error ? err.message : String(err) };
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        balanceDetails = {
+          error: errorMessage,
+          code: (err as any)?.code || null,
+          hint: "If this persists, verify CIRCLE_WALLET_ID belongs to the same Circle account and environment as CIRCLE_API_KEY."
+        };
       }
     }
     
@@ -100,134 +190,105 @@ async function startServer() {
       walletId,
       balance,
       balanceDetails,
+      balanceSource,
       isAddressNotice: isAddress ? "WARNING: Your Wallet ID starts with 0x. Circle usually requires a UUID (e.g. 1000...) as the ID, not the address." : null,
       hasGemini: !!process.env.GEMINI_API_KEY,
-      network: "Arc Layer-1 Mainnet",
-      status: "Production Mode",
-      environment: CIRCLE_API_KEY?.startsWith('Q_') ? 'sandbox' : 'production'
+      network: "Arc Layer-1 Testnet",
+      status: environment === 'sandbox' ? 'Sandbox Mode' : (environment === 'production' ? 'Production Mode' : 'Unconfigured'),
+      environment
     });
   });
 
   // API Proxy for Circle
   app.post("/api/pay", async (req, res) => {
-    const { amount, recipientWallet, workerId } = req.body;
-    
-    // Using exact variable names as they appear in the Secrets panel
-    const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY;
-    const CIRCLE_WALLET_ID = process.env.CIRCLE_WALLET_ID || process.env.CIRCLE_WALLET_ADDRESS;
-    const CIRCLE_APP_ID = process.env.CIRCLE_APP_ID;
-    
-    const isSandbox = CIRCLE_API_KEY?.startsWith('Q_'); // Circle Sandbox keys usually start with Q_
-    const baseUrl = isSandbox ? 'https://api-sandbox.circle.com' : 'https://api.circle.com';
+    const { amount, recipientWallet, workerId } = req.body || {};
 
-    console.log(`[${isSandbox ? 'SANDBOX' : 'PRODUCTION'} MODE] Moving funds from ${CIRCLE_WALLET_ID} to ${recipientWallet} via Arc L1`);
+    const walletId = (process.env.CIRCLE_WALLET_ID || "").trim();
+    const appId = (process.env.CIRCLE_APP_ID || "").trim(); // optional tracking value
+    const client = getCircleClient(); // must be initialized with CIRCLE_API_KEY + ENTITY_SECRET
 
-    // Strict Hackathon Rule 1: Sub-cent guardrail
-    if (typeof amount !== 'number' || amount > 0.01 || amount <= 0) {
-      return res.status(400).json({ 
-        success: false, 
-        error: "Financial Policy Violation: Transaction must be between $0.0001 and $0.01 USDC." 
+    if (!client) {
+      return res.status(500).json({
+        success: false,
+        error: "Circle client is not initialized. Check CIRCLE_API_KEY and ENTITY_SECRET."
       });
     }
 
-    if (!CIRCLE_API_KEY || CIRCLE_API_KEY === "MY_CIRCLE_API_KEY") {
-      return res.status(500).json({ 
-        success: false, 
-        error: "Configuration Error: `CIRCLE_API_KEY` is missing in Secrets panel." 
+    if (!walletId) {
+      return res.status(500).json({
+        success: false,
+        error: "CIRCLE_WALLET_ID is missing."
       });
     }
 
-    if (!CIRCLE_WALLET_ID || CIRCLE_WALLET_ID === "MY_WALLET_ID") {
-      return res.status(500).json({ 
-        success: false, 
-        error: "Configuration Error: `CIRCLE_WALLET_ID` is missing in Secrets panel." 
+    if (typeof amount !== "number" || Number.isNaN(amount)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid amount type."
+      });
+    }
+
+    if (!isExactNanopayment(amount)) {
+      return res.status(400).json({
+        success: false,
+        error: "Policy violation: payment must be exactly 0.005 USDC."
+      });
+    }
+
+    if (amount <= 0 || amount > 0.01) {
+      return res.status(400).json({
+        success: false,
+        error: "Financial guardrail violation: amount must be > 0 and <= 0.01."
+      });
+    }
+
+    if (!isValidEvmAddress(String(recipientWallet || ""))) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid recipient wallet address."
       });
     }
 
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout for payments
+      const usdcTokenId = await resolveArcUsdcTokenId(client, walletId);
 
-      // Circle API Headers
-      const headers: Record<string, string> = {
-        'Authorization': `Bearer ${CIRCLE_API_KEY}`,
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
-      };
-
-      // If CIRCLE_APP_ID is present, we include it as per Circle Programmable Wallets requirements
-      if (CIRCLE_APP_ID && CIRCLE_APP_ID !== "MY_CIRCLE_APP_ID") {
-        headers['X-Circle-Application-Id'] = CIRCLE_APP_ID;
-      }
-
-      // Correct endpoint for Wallet-to-Wallet Nanopayments on Arc
-      // Documentation: https://developers.circle.com/reference/createtransfer
-      const response = await fetch(`${baseUrl}/v1/transfers`, {
-        method: 'POST',
-        headers,
-        signal: controller.signal as any,
-        body: JSON.stringify({
-          idempotencyKey: uuidv4(),
-          source: { 
-            id: CIRCLE_WALLET_ID, 
-            type: 'wallet' 
-          },
-          destination: { 
-            type: 'blockchain',
-            address: recipientWallet, 
-            chain: 'ARC' 
-          },
-          amount: { 
-            amount: amount.toFixed(4), 
-            currency: 'USD' 
-          },
-        })
+      const createTx = await client.createTransaction({
+        idempotencyKey: uuidv4(),
+        walletId,
+        tokenId: usdcTokenId,
+        destinationAddress: recipientWallet,
+        amount: [amount.toFixed(6)],
+        fee: {
+          type: "level",
+          config: { feeLevel: "MEDIUM" }
+        },
+        refId: "swarm:" + String(workerId || "worker") + ":" + Date.now()
       });
-      clearTimeout(timeoutId);
 
-      const text = await response.text();
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (e) {
-        console.error("[CIRCLE RESPONSE PARSE ERROR]", text);
-        return res.status(500).json({
-          success: false,
-          error: "Circle returned an invalid response format.",
-          raw: text.slice(0, 500)
-        });
-      }
-      
-      if (!response.ok) {
-        console.error("[CIRCLE ERROR DETAIL]", JSON.stringify(data, null, 2));
-        const circleError = data.message || data.error || (data.errors && data.errors[0]?.message) || `Circle API error (${response.status})`;
-        
-        // We return 200 with success:false to prevent intermediate proxies from replacing our JSON error with HTML error pages on 403/401/etc.
-        return res.json({
-          success: false,
-          error: circleError,
-          status: response.status,
-          details: data,
-          info: response.status === 403 ? "Circle 403 Forbidden: 1. Ensure your API Key is authorized for 'Payments/Transfers'. 2. Check if your API Key is a 'Standard' key vs. 'Programmable Wallets' key. 3. Ensure your IP is not restricted in Circle Dashboard." : null
-        });
+      const circleTransactionId = createTx?.data?.id;
+      if (!circleTransactionId) {
+        throw new Error("Circle did not return a transaction id.");
       }
 
-      console.log(`[SUCCESS] Payment finalized on Arc L1. Tx: ${data.data.id}`);
+      const finalized = await waitForFinalTransaction(client, circleTransactionId, 60000, 1500);
 
       return res.json({
         success: true,
-        txHash: data.data.id, // Using Circle's internal tracking ID or blockchain hash
-        amount: data.data.amount.amount,
-        status: data.data.status,
+        txHash: finalized?.txHash || circleTransactionId,
+        circleTransactionId,
+        status: finalized?.state || "PENDING",
+        amount: amount.toFixed(6),
+        appIdLoaded: Boolean(appId),
         timestamp: Date.now()
       });
+    } catch (err: any) {
+      const details = err?.response?.data || err?.data || null;
+      const message = details?.message || err?.message || "Circle transfer failed";
 
-    } catch (err) {
-      console.error("[PAYMENT FATAL]", err);
-      res.status(500).json({ 
-        success: false, 
-        error: "Blockchain Settlement Failed",
-        details: err instanceof Error ? err.message : "Undefined error"
+      return res.status(502).json({
+        success: false,
+        error: message,
+        details
       });
     }
   });

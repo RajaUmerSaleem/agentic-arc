@@ -11,12 +11,139 @@ const MAX_PAYMENT = 0.01;
 
 // REAL RECIPIENT ADDRESS (In a real app, this would be the worker's unique generated wallet)
 // For the demo, we use a valid hex address format.
-const WORKER_WALLET_ADDRESS = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"; 
+const WORKER_WALLET_ADDRESS = "0x5baede5bc635dc28924f6db47495c5e36ae2d4aa"; 
+
+const STORAGE_KEYS = {
+  messages: 'agentic-swarm:messages',
+  transactions: 'agentic-swarm:transactions',
+  legacyMessages: 'messages',
+  legacyTransactions: 'transactions'
+} as const;
+
+const MAX_STORED_MESSAGES = 500;
+const MAX_STORED_TRANSACTIONS = 300;
+
+const parseNumber = (value: unknown): number | null => {
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+const generateFallbackId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
+
+const normalizeSender = (value: unknown): AgentMessage['sender'] | null => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.toLowerCase();
+  if (normalized === 'user') return 'User';
+  if (normalized === 'coordinator') return 'Coordinator';
+  if (normalized === 'worker') return 'Worker';
+  if (normalized === 'system') return 'System';
+  return null;
+};
+
+const normalizeStatus = (value: unknown): Transaction['status'] => {
+  if (typeof value !== 'string') return 'confirmed';
+  const normalized = value.toLowerCase();
+  if (normalized === 'pending') return 'pending';
+  if (normalized === 'failed') return 'failed';
+  return 'confirmed';
+};
+
+const normalizeStoredMessage = (value: unknown): AgentMessage | null => {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+
+  const sender = normalizeSender(v.sender ?? v.role);
+  const content =
+    typeof v.content === 'string'
+      ? v.content
+      : typeof v.message === 'string'
+        ? v.message
+        : typeof v.text === 'string'
+          ? v.text
+          : '';
+  const timestamp = parseNumber(v.timestamp ?? v.time ?? v.createdAt);
+
+  if (!sender || !content || timestamp === null) return null;
+
+  return {
+    id: typeof v.id === 'string' && v.id ? v.id : generateFallbackId(),
+    sender,
+    content,
+    timestamp,
+  };
+};
+
+const normalizeStoredTransaction = (value: unknown): Transaction | null => {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+
+  const amount = parseNumber(v.amount);
+  const timestamp = parseNumber(v.timestamp ?? v.time ?? v.createdAt);
+  if (amount === null || timestamp === null) return null;
+
+  const txHash = typeof v.txHash === 'string' ? v.txHash : undefined;
+  const from = typeof v.from === 'string' && v.from ? v.from : 'Coordinator';
+  const to = typeof v.to === 'string' && v.to ? v.to : 'Worker';
+
+  return {
+    id: typeof v.id === 'string' && v.id ? v.id : txHash || generateFallbackId(),
+    from,
+    to,
+    amount,
+    status: normalizeStatus(v.status),
+    txHash,
+    timestamp,
+  };
+};
+
+const parseStoredEntries = (raw: string): unknown[] => {
+  const parsed: unknown = JSON.parse(raw);
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === 'object') {
+    const obj = parsed as Record<string, unknown>;
+    if (Array.isArray(obj.items)) return obj.items;
+    if (Array.isArray(obj.data)) return obj.data;
+  }
+  return [];
+};
+
+const loadStoredArray = <T,>(keys: string[], normalizer: (item: unknown) => T | null): T[] => {
+  if (typeof window === 'undefined') return [];
+  for (const key of keys) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      const entries = parseStoredEntries(raw);
+      if (entries.length === 0) return [];
+      return entries
+        .map(normalizer)
+        .filter((item): item is T => item !== null);
+    } catch {
+      // Continue to next candidate key.
+    }
+  }
+  return [];
+};
 
 export default function App() {
   const [task, setTask] = useState('');
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [messages, setMessages] = useState<AgentMessage[]>(() =>
+    loadStoredArray(
+      [STORAGE_KEYS.messages, STORAGE_KEYS.legacyMessages],
+      normalizeStoredMessage
+    )
+  );
+  const [transactions, setTransactions] = useState<Transaction[]>(() =>
+    loadStoredArray(
+      [STORAGE_KEYS.transactions, STORAGE_KEYS.legacyTransactions],
+      normalizeStoredTransaction
+    )
+  );
   const [isRunning, setIsRunning] = useState(false);
   const [latency, setLatency] = useState(12);
   const [lastBlock, setLastBlock] = useState(8429302);
@@ -64,6 +191,28 @@ export default function App() {
     window.addEventListener('resize', checkMobile);
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const storedMessages = messages.slice(-MAX_STORED_MESSAGES);
+      window.localStorage.setItem(STORAGE_KEYS.messages, JSON.stringify(storedMessages));
+      window.localStorage.removeItem(STORAGE_KEYS.legacyMessages);
+    } catch (err) {
+      console.warn('Unable to persist messages to localStorage:', err);
+    }
+  }, [messages]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const storedTransactions = transactions.slice(0, MAX_STORED_TRANSACTIONS);
+      window.localStorage.setItem(STORAGE_KEYS.transactions, JSON.stringify(storedTransactions));
+      window.localStorage.removeItem(STORAGE_KEYS.legacyTransactions);
+    } catch (err) {
+      console.warn('Unable to persist transactions to localStorage:', err);
+    }
+  }, [transactions]);
 
   // Dynamic Network Stats Effect
   useEffect(() => {
@@ -386,7 +535,6 @@ export default function App() {
   const runSwarm = async () => {
     if (!task || isRunning) return;
     setIsRunning(true);
-    setMessages([]);
     
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
     if (!apiKey || apiKey === 'undefined' || apiKey === 'YOUR_API_KEY') {
@@ -527,7 +675,7 @@ export default function App() {
   };
 
   return (
-    <div className="bg-[#0A0A0B] text-[#E0E0E0] min-h-screen flex flex-col font-sans overflow-hidden touch-manipulation">
+    <div className="bg-[#0A0A0B] text-[#E0E0E0] min-h-screen h-screen flex flex-col font-sans overflow-hidden touch-manipulation">
       {/* Real-time Nanopayment Ticker (Judge Proof Layer) */}
       <div className="bg-[#00D1FF] h-6 flex items-center overflow-hidden whitespace-nowrap border-b border-black">
         <div className="flex animate-[marquee_30s_linear_infinite] gap-10">
@@ -601,7 +749,7 @@ export default function App() {
       </header>
 
       {/* Main Content Layout */}
-      <main className="flex-1 relative overflow-hidden">
+      <main className="flex-1 min-h-0 relative overflow-hidden flex flex-col">
         {/* Mobile Tab Navigation */}
         <div className="lg:hidden flex bg-[#0E0E10] border-b border-[#1F1F23]">
           <button 
@@ -625,7 +773,7 @@ export default function App() {
         </div>
 
         {/* Desktop: 3-column grid | Mobile: Single panel view */}
-        <div className="lg:grid lg:grid-cols-12 h-full">
+        <div className="lg:grid lg:grid-cols-12 flex-1 min-h-0">
         
         {/* Left Panel: Agent Hierarchy */}
         <aside className={`${activePanel === 'agents' || !isMobile ? 'block' : 'hidden'} lg:col-span-3 border-r border-[#1F1F23] bg-[#0E0E10] p-4 lg:p-6 flex flex-col overflow-y-auto absolute lg:relative inset-0 z-20 lg:z-auto ${leftSidebarOpen ? 'block' : 'hidden lg:flex'}`}>
@@ -712,7 +860,7 @@ export default function App() {
         </aside>
 
         {/* Middle Panel: Payment Loop Activity (Transaction Terminal) */}
-        <section className={`${activePanel === 'terminal' || !isMobile ? 'flex' : 'hidden'} lg:col-span-6 bg-[#0A0A0B] flex-col border-r border-[#1F1F23] h-full`}>
+        <section className={`${activePanel === 'terminal' || !isMobile ? 'flex' : 'hidden'} lg:col-span-6 bg-[#0A0A0B] flex-col border-r border-[#1F1F23] h-full min-h-0`}>
           <div className="p-6 border-b border-[#1F1F23] flex justify-between items-center bg-[#0A0A0B]/80 backdrop-blur-md sticky top-0 z-10 shrink-0 shadow-lg">
             <div className="flex flex-col">
               <h2 className="text-xs font-semibold text-white uppercase tracking-widest flex items-center gap-2">
@@ -757,7 +905,7 @@ export default function App() {
           {/* Terminal View */}
           <div 
             ref={scrollRef}
-            className="flex-1 p-6 space-y-4 overflow-y-auto font-mono text-[11px] bg-[#0A0A0B] relative select-text"
+            className="flex-1 min-h-0 p-6 space-y-4 overflow-y-auto font-mono text-[11px] bg-[#0A0A0B] relative select-text"
           >
             <AnimatePresence>
               {messages.length === 0 && (
@@ -911,7 +1059,6 @@ export default function App() {
                     </div>
                     <div className="flex flex-col items-end">
                       <span className="text-[8px] text-[#8E9299] uppercase">{w.blockchain || 'ETH-SEP'}</span>
-                      <span className="text-[8px] text-[#00D1FF] font-mono">{w.balance ? `${parseFloat(w.balance).toFixed(2)} USDC` : '--'}</span>
                     </div>
                     <span className={`text-[8px] ${w.state === 'LIVE' ? 'text-[#00FF85]' : 'text-[#FFB000]'}`}>{w.state || 'pending'}</span>
                   </div>
@@ -933,8 +1080,8 @@ export default function App() {
 
             <section>
               <div className="text-[10px] text-[#8E9299] uppercase mb-4 tracking-tight border-l-2 border-[#00D1FF] pl-2 font-bold">Swarm Ledger (50+ TX PROOF)</div>
-              <div className="space-y-2 max-h-[300px] overflow-y-auto scrollbar-none">
-                {transactions.slice(0, 10).map((tx, i) => (
+              <div className="space-y-2 h-50 overflow-y-auto overscroll-contain pr-1 scrollbar-none">
+                {transactions.map((tx, i) => (
                   <div key={i} className="flex justify-between items-center text-[10px] group border-b border-[#1F1F23] pb-1">
                     <span className="text-[#00FF85] font-mono">{tx.txHash?.slice(0, 8)}...</span>
                     <span className="font-mono text-[#E0E0E0]">${tx.amount}</span>
@@ -943,24 +1090,6 @@ export default function App() {
                 {transactions.length === 0 && (
                   <p className="text-[10px] text-[#8E9299] opacity-50 italic text-center py-4">Awaiting Transaction Proofs...</p>
                 )}
-              </div>
-            </section>
-
-            <section className="p-4 rounded-lg bg-black/40 border border-[#1F1F23] shadow-inner">
-              <div className="text-[10px] text-[#8E9299] uppercase mb-3 font-bold border-b border-[#1F1F23] pb-1">Live Demo Parameters</div>
-              <div className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-[10px] text-[#8E9299]">Protocol</span>
-                  <span className="text-[10px] text-[#00D1FF] font-mono">x402 / Arc L1</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-[10px] text-[#8E9299]">Curreny</span>
-                  <span className="text-[10px] text-white font-mono">USDC (Circle)</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-[10px] text-[#8E9299]">Stability</span>
-                  <span className="text-[10px] text-[#00FF85] font-mono">PRODUCTION</span>
-                </div>
               </div>
             </section>
           </div>
