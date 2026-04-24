@@ -12,6 +12,11 @@ export default defineConfig(({mode}) => {
       'process.env.FALLBACK_AI_API_KEY': JSON.stringify(env.FALLBACK_AI_API_KEY),
       'process.env.FALLBACK_AI_BASE_URL': JSON.stringify(env.FALLBACK_AI_BASE_URL),
       'process.env.FALLBACK_AI_MODEL': JSON.stringify(env.FALLBACK_AI_MODEL),
+      'process.env.CIRCLE_API_KEY': JSON.stringify(env.CIRCLE_API_KEY),
+      'process.env.CIRCLE_WALLET_ID': JSON.stringify(env.CIRCLE_WALLET_ID),
+    },
+    optimizeDeps: {
+      exclude: ['@circle-fin/developer-controlled-wallets'],
     },
     resolve: {
       alias: {
