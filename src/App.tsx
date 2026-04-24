@@ -192,6 +192,9 @@ export default function App() {
       const data = await res.json();
       if (data.success) {
         setWallets(data.wallets || []);
+      } else if (data.demo) {
+        // Hackathon demo mode — show friendly info, not an error
+        setWallets([]);
       } else {
         setWalletError(data.error || 'Failed to load wallets');
       }
@@ -214,7 +217,11 @@ export default function App() {
       const data = await res.json();
       if (data.success && data.wallet) {
         setWallets(prev => [...prev, data.wallet]);
-        addMessage('System', `✅ New agent wallet created: ${data.address?.slice(0, 12)}... on ${data.wallet.blockchain || 'ETH-SEPOLIA'}`);
+        if (data.demo) {
+          addMessage('System', `⚠️ ${data.info} Simulated wallet: ${data.address?.slice(0, 12)}...`);
+        } else {
+          addMessage('System', `✅ New agent wallet created: ${data.address?.slice(0, 12)}... on ${data.wallet.blockchain || 'ETH-SEPOLIA'}`);
+        }
       } else {
         setWalletError(data.error || 'Wallet creation failed');
       }

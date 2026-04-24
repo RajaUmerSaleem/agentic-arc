@@ -234,8 +234,12 @@ async function startServer() {
         message: 'Engine registered successfully. Save the recovery file!'
       });
     } catch (err: any) {
+      const msg = err?.message || '';
+      if (msg.includes('malformed API key')) {
+        return res.json({ success: false, error: msg, demo: true, info: 'Your Circle key is in the old format. Hackathon demo mode active.' });
+      }
       console.error('[REGISTER]', err);
-      return res.status(500).json({ success: false, error: err?.message || 'Registration failed' });
+      return res.status(500).json({ success: false, error: msg || 'Registration failed' });
     }
   });
 
@@ -243,7 +247,7 @@ async function startServer() {
   app.get("/api/wallets", async (req, res) => {
     const client = getCircleClient();
     if (!client) {
-      return res.status(503).json({ success: false, error: 'Circle SDK not configured (needs ENV:ID:SECRET key format)' });
+      return res.json({ success: false, error: 'Circle SDK not configured', demo: true, info: 'Hackathon demo mode: create a wallet to see simulated addresses.' });
     }
     try {
       const response = await client.listWallets({});
@@ -253,19 +257,21 @@ async function startServer() {
         count: response.data?.wallets?.length || 0
       });
     } catch (err: any) {
+      const msg = err?.message || '';
+      if (msg.includes('malformed API key')) {
+        return res.json({ success: false, error: msg, demo: true, info: 'Your Circle key is in the old format. Hackathon demo mode active.' });
+      }
       console.error('[WALLETS LIST]', err);
-      return res.status(500).json({ success: false, error: err?.message || 'Failed to list wallets' });
+      return res.status(500).json({ success: false, error: msg || 'Failed to list wallets' });
     }
   });
 
   // Create wallet set + wallet (returns address for agent use)
   app.post("/api/wallets", async (req, res) => {
     const client = getCircleClient();
-    if (!client) {
-      return res.status(503).json({ success: false, error: 'Circle SDK not configured (needs ENV:ID:SECRET key format)' });
-    }
     const { name = 'Agent Wallet', blockchain = 'ETH-SEPOLIA', accountType = 'SCA' } = req.body;
     try {
+      if (!client) throw new Error('Circle SDK not configured');
       const setRes = await client.createWalletSet({ name: `${name} Set` });
       const walletSetId = setRes.data?.walletSet?.id;
       if (!walletSetId) throw new Error('Wallet set creation returned no ID');
@@ -286,8 +292,20 @@ async function startServer() {
         message: wallet ? `Wallet created on ${blockchain}` : 'Wallet creation failed'
       });
     } catch (err: any) {
+      const msg = err?.message || '';
+      if (msg.includes('malformed API key')) {
+        // Return a simulated demo wallet so the UI still works
+        const demoAddress = '0x' + Array.from({length: 40}, () => Math.floor(Math.random() * 16).toString(16)).join('');
+        return res.json({
+          success: true,
+          demo: true,
+          wallet: { id: 'demo-' + Date.now(), address: demoAddress, blockchain, state: 'DEMO' },
+          address: demoAddress,
+          info: 'Hackathon demo wallet (Circle key needs ENV:ID:SECRET format)'
+        });
+      }
       console.error('[WALLET CREATE]', err);
-      return res.status(500).json({ success: false, error: err?.message || 'Wallet creation failed' });
+      return res.status(500).json({ success: false, error: msg || 'Wallet creation failed' });
     }
   });
 
