@@ -333,6 +333,30 @@ async function startServer() {
     }
   });
 
+  // Get wallet balance (USDC) by wallet ID
+  app.get("/api/wallets/:id/balance", async (req, res) => {
+    const client = getCircleClient();
+    if (!client) {
+      return res.json({ success: false, error: 'Circle SDK not configured', demo: true, balance: '0.00' });
+    }
+    try {
+      // Circle SDK getWalletTokenBalance or listWallets with ID
+      const response = await client.listWallets({});
+      const wallet = (response.data?.wallets || []).find((w: any) => w.id === req.params.id);
+      if (!wallet) return res.status(404).json({ success: false, error: 'Wallet not found' });
+
+      // Try to get balance from wallet object (SDK may return balances in extended data)
+      const walletData = wallet as any;
+      const balances = walletData.balances || [];
+      const usdcBalance = balances.find((b: any) => b?.token?.symbol === 'USDC' || b?.token?.name?.includes('USD'));
+      const balance = usdcBalance?.amount || '0.00';
+
+      return res.json({ success: true, balance, walletId: req.params.id, address: wallet.address });
+    } catch (err: any) {
+      return res.json({ success: false, error: err?.message || 'Failed to get balance', balance: '0.00' });
+    }
+  });
+
   // Proxy endpoint for fallback AI (OpenAI-compatible chat completions)
   app.post("/api/chat", async (req, res) => {
     const FALLBACK_API_KEY = process.env.FALLBACK_AI_API_KEY;

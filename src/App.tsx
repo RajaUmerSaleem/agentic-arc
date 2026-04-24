@@ -48,11 +48,12 @@ export default function App() {
   const [demoMode, setDemoMode] = useState(false);
 
   // Circle wallet management (arc-engine integration)
-  const [wallets, setWallets] = useState<Array<{ id: string; address?: string; blockchain?: string; state?: string }>>([]);
+  const [wallets, setWallets] = useState<Array<{ id: string; address?: string; blockchain?: string; state?: string; balance?: string }>>([]);
   const [isLoadingWallets, setIsLoadingWallets] = useState(false);
   const [walletError, setWalletError] = useState<string | null>(null);
   const [copiedWalletId, setCopiedWalletId] = useState<string | null>(null);
   const [engineRegistered, setEngineRegistered] = useState(false);
+  const [copiedUuid, setCopiedUuid] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -186,6 +187,20 @@ export default function App() {
   };
 
   // ── Circle Wallet Management (arc-engine integration) ──
+  const fetchWalletBalance = async (walletId: string) => {
+    try {
+      const res = await fetch(`/api/wallets/${walletId}/balance`);
+      const data = await res.json();
+      if (data.success) {
+        setWallets(prev => prev.map(w =>
+          w.id === walletId ? { ...w, balance: data.balance } : w
+        ));
+      }
+    } catch (err) {
+      console.error('Balance fetch error:', err);
+    }
+  };
+
   const fetchWallets = async () => {
     setIsLoadingWallets(true);
     setWalletError(null);
@@ -193,7 +208,14 @@ export default function App() {
       const res = await fetch('/api/wallets');
       const data = await res.json();
       if (data.success) {
-        setWallets(data.wallets || []);
+        const loadedWallets = data.wallets || [];
+        setWallets(loadedWallets);
+        // Fetch balances for each wallet
+        loadedWallets.forEach((w: any) => {
+          if (w.id && !w.id.startsWith('demo-')) {
+            fetchWalletBalance(w.id);
+          }
+        });
       } else if (data.demo) {
         // Hackathon demo mode — show friendly info, not an error
         setWallets([]);
@@ -874,9 +896,23 @@ export default function App() {
                           <Copy size={10} className="opacity-0 group-hover:opacity-50 transition-opacity" />
                         )}
                       </span>
-                      <span className="text-[7px] text-[#8E9299] font-mono truncate max-w-[100px]" title="Wallet UUID (click address to copy)">{w.id?.slice(0, 14)}...</span>
+                      <span
+                        className="text-[7px] text-[#8E9299] font-mono truncate max-w-[100px] cursor-pointer hover:text-[#00D1FF] transition-colors"
+                        title="Click to copy full Wallet UUID"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigator.clipboard.writeText(w.id);
+                          setCopiedUuid(w.id);
+                          setTimeout(() => setCopiedUuid(null), 2000);
+                        }}
+                      >
+                        {w.id?.slice(0, 14)}... {copiedUuid === w.id ? '✓' : ''}
+                      </span>
                     </div>
-                    <span className="text-[8px] text-[#8E9299] uppercase">{w.blockchain || 'ETH-SEP'}</span>
+                    <div className="flex flex-col items-end">
+                      <span className="text-[8px] text-[#8E9299] uppercase">{w.blockchain || 'ETH-SEP'}</span>
+                      <span className="text-[8px] text-[#00D1FF] font-mono">{w.balance ? `${parseFloat(w.balance).toFixed(2)} USDC` : '--'}</span>
+                    </div>
                     <span className={`text-[8px] ${w.state === 'LIVE' ? 'text-[#00FF85]' : 'text-[#FFB000]'}`}>{w.state || 'pending'}</span>
                   </div>
                 ))}
