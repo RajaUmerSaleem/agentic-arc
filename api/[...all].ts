@@ -1,4 +1,4 @@
-import { createApiApp } from '../server';
+import { createApiApp } from './app';
 
 let appInstance: any | null = null;
 
