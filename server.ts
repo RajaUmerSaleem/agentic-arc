@@ -1,12 +1,10 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { v4 as uuidv4 } from 'uuid';
 import fetch from "node-fetch";
-import { initiateDeveloperControlledWalletsClient, registerEntitySecretCiphertext } from '@circle-fin/developer-controlled-wallets';
 
 dotenv.config();
 dotenv.config({ path: '.env.local', override: true });
@@ -15,8 +13,62 @@ dotenv.config({ path: '.env.local', override: true });
 // Note: old keys like "HACKATON_ENGINE" may work with @circle-fin/developer-controlled-wallets SDK
 let circleClientInstance: any = null;
 let circleClientError: string | null = null;
+const CIRCLE_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.CIRCLE_REQUEST_TIMEOUT_MS || '9000', 10);
+type CircleSdkResult = { data?: any };
+type CircleSdkModule = {
+  initiateDeveloperControlledWalletsClient: (args: { apiKey: string; entitySecret: string }) => any;
+  registerEntitySecretCiphertext: (args: { apiKey: string; entitySecret: string }) => Promise<any>;
+};
 
-function getCircleClient() {
+let circleSdkPromise: Promise<CircleSdkModule | null> | null = null;
+let circleSdkError: string | null = null;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const timeoutError = new Error(`${operation} timed out after ${timeoutMs}ms`);
+      (timeoutError as any).code = 'ETIMEDOUT';
+      reject(timeoutError);
+    }, timeoutMs);
+
+    promise
+      .then(resolve)
+      .catch(reject)
+      .finally(() => clearTimeout(timer));
+  });
+}
+
+function isRecoverableCircleError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('malformed api key') ||
+    normalized.includes('invalid credentials') ||
+    normalized.includes('timed out') ||
+    normalized.includes('timeout') ||
+    normalized.includes('fetch failed') ||
+    normalized.includes('econnreset') ||
+    normalized.includes('enotfound') ||
+    normalized.includes('socket hang up') ||
+    normalized.includes('service unavailable')
+  );
+}
+
+async function getCircleSdk(): Promise<CircleSdkModule | null> {
+  if (circleSdkPromise) return circleSdkPromise;
+  circleSdkPromise = import('@circle-fin/developer-controlled-wallets')
+    .then((mod) => ({
+      initiateDeveloperControlledWalletsClient: mod.initiateDeveloperControlledWalletsClient,
+      registerEntitySecretCiphertext: mod.registerEntitySecretCiphertext
+    }))
+    .catch((err: any) => {
+      circleSdkError = err?.message || 'Failed to load Circle SDK';
+      console.error('[Circle SDK Load Error]', circleSdkError);
+      return null;
+    });
+  return circleSdkPromise;
+}
+
+async function getCircleClient() {
   const apiKey = process.env.CIRCLE_API_KEY?.trim() || '';
   const entitySecret = process.env.ENTITY_SECRET?.trim() || '';
   const hasKey = apiKey.length > 0 && apiKey !== 'MY_CIRCLE_API_KEY' && apiKey !== 'YOUR_CIRCLE_API_KEY';
@@ -28,7 +80,12 @@ function getCircleClient() {
   if (circleClientError) return null;
 
   try {
-    circleClientInstance = initiateDeveloperControlledWalletsClient({ apiKey, entitySecret });
+    const sdk = await getCircleSdk();
+    if (!sdk) {
+      circleClientError = circleSdkError || 'Circle SDK unavailable';
+      return null;
+    }
+    circleClientInstance = sdk.initiateDeveloperControlledWalletsClient({ apiKey, entitySecret });
     return circleClientInstance;
   } catch (err: any) {
     circleClientError = err?.message || 'Failed to initialize Circle client';
@@ -148,7 +205,7 @@ export function createApiApp() {
     let balanceSource: 'sdk' | 'rest' | 'none' = 'none';
 
     if (walletId !== "PENDING_CONFIG" && !isAddress) {
-      const client = getCircleClient();
+      const client = await getCircleClient();
 
       try {
         // Primary path: Circle SDK (works with Developer-Controlled Wallets and Entity Secret signing setup)
@@ -234,7 +291,7 @@ export function createApiApp() {
 
     const walletId = (process.env.CIRCLE_WALLET_ID || "").trim();
     const appId = (process.env.CIRCLE_APP_ID || "").trim(); // optional tracking value
-    const client = getCircleClient(); // must be initialized with CIRCLE_API_KEY + ENTITY_SECRET
+    const client = await getCircleClient(); // must be initialized with CIRCLE_API_KEY + ENTITY_SECRET
 
     if (!client) {
       return res.status(500).json({
@@ -332,7 +389,11 @@ export function createApiApp() {
       return res.status(400).json({ success: false, error: 'CIRCLE_API_KEY and ENTITY_SECRET required' });
     }
     try {
-      const response = await registerEntitySecretCiphertext({ apiKey, entitySecret });
+      const sdk = await getCircleSdk();
+      if (!sdk) {
+        return res.json({ success: false, error: circleSdkError || 'Circle SDK unavailable', demo: true, info: 'Circle SDK could not load on this runtime. Hackathon demo mode active.' });
+      }
+      const response = await sdk.registerEntitySecretCiphertext({ apiKey, entitySecret });
       return res.json({
         success: true,
         recoveryFile: response.data?.recoveryFile,
@@ -358,16 +419,19 @@ export function createApiApp() {
 
   // List all wallets
   app.get("/api/wallets", async (req, res) => {
-    const client = getCircleClient();
+    const client = await getCircleClient();
     if (!client) {
       // Client init failed or not configured — return demo mode gracefully
       if (circleClientError) {
         return res.json({ success: false, error: circleClientError, demo: true, info: 'Circle SDK initialization failed. Hackathon demo mode active.' });
       }
+      if (circleSdkError) {
+        return res.json({ success: false, error: circleSdkError, demo: true, info: 'Circle SDK failed to load in this runtime. Hackathon demo mode active.' });
+      }
       return res.json({ success: false, error: 'Circle SDK not configured', demo: true, info: 'Hackathon demo mode: create a wallet to see simulated addresses.' });
     }
     try {
-      const response = await client.listWallets({});
+      const response = await withTimeout<CircleSdkResult>(client.listWallets({}), CIRCLE_REQUEST_TIMEOUT_MS, 'Circle listWallets');
       return res.json({
         success: true,
         wallets: response.data?.wallets || [],
@@ -375,30 +439,39 @@ export function createApiApp() {
       });
     } catch (err: any) {
       const msg = err?.message || '';
-      if (msg.includes('malformed API key') || msg.includes('Invalid credentials')) {
+      if (isRecoverableCircleError(msg)) {
         return res.json({ success: false, error: msg, demo: true, info: 'Circle credentials invalid (API key format, entity secret, or IP mismatch). Hackathon demo mode active.' });
       }
       console.error('[WALLETS LIST]', err);
-      return res.status(500).json({ success: false, error: msg || 'Failed to list wallets' });
+      return res.json({
+        success: false,
+        error: msg || 'Failed to list wallets',
+        demo: true,
+        info: 'Circle service temporarily unavailable. Showing demo mode to keep the app usable on Vercel.'
+      });
     }
   });
 
   // Create wallet set + wallet (returns address for agent use)
   app.post("/api/wallets", async (req, res) => {
-    const client = getCircleClient();
+    const client = await getCircleClient();
     const { name = 'Agent Wallet', blockchain = 'ETH-SEPOLIA', accountType = 'SCA' } = req.body;
     try {
       if (!client) throw new Error('Circle SDK not configured');
-      const setRes = await client.createWalletSet({ name: `${name} Set` });
+      const setRes = await withTimeout<CircleSdkResult>(
+        client.createWalletSet({ name: `${name} Set` }),
+        CIRCLE_REQUEST_TIMEOUT_MS,
+        'Circle createWalletSet'
+      );
       const walletSetId = setRes.data?.walletSet?.id;
       if (!walletSetId) throw new Error('Wallet set creation returned no ID');
 
-      const walletRes = await client.createWallets({
+      const walletRes = await withTimeout<CircleSdkResult>(client.createWallets({
         accountType: accountType as 'SCA' | 'EOA',
         blockchains: [blockchain],
         count: 1,
         walletSetId
-      });
+      }), CIRCLE_REQUEST_TIMEOUT_MS, 'Circle createWallets');
 
       const wallet = walletRes.data?.wallets?.[0];
       return res.json({
@@ -410,7 +483,7 @@ export function createApiApp() {
       });
     } catch (err: any) {
       const msg = err?.message || '';
-      if (msg.includes('malformed API key') || msg.includes('Invalid credentials')) {
+      if (isRecoverableCircleError(msg)) {
         // Return a simulated demo wallet so the UI still works
         const demoAddress = '0x' + Array.from({length: 40}, () => Math.floor(Math.random() * 16).toString(16)).join('');
         return res.json({
@@ -428,29 +501,33 @@ export function createApiApp() {
 
   // Get wallet details by ID
   app.get("/api/wallets/:id", async (req, res) => {
-    const client = getCircleClient();
+    const client = await getCircleClient();
     if (!client) {
       return res.status(503).json({ success: false, error: 'Circle SDK not configured' });
     }
     try {
-      const response = await client.listWallets({});
+      const response = await withTimeout<CircleSdkResult>(client.listWallets({}), CIRCLE_REQUEST_TIMEOUT_MS, 'Circle listWallets by id');
       const wallet = (response.data?.wallets || []).find((w: any) => w.id === req.params.id);
       if (!wallet) return res.status(404).json({ success: false, error: 'Wallet not found' });
       return res.json({ success: true, wallet });
     } catch (err: any) {
-      return res.status(500).json({ success: false, error: err?.message || 'Failed to get wallet' });
+      const msg = err?.message || 'Failed to get wallet';
+      if (isRecoverableCircleError(msg)) {
+        return res.status(503).json({ success: false, error: msg, demo: true });
+      }
+      return res.status(500).json({ success: false, error: msg });
     }
   });
 
   // Get wallet balance (USDC) by wallet ID
   app.get("/api/wallets/:id/balance", async (req, res) => {
-    const client = getCircleClient();
+    const client = await getCircleClient();
     if (!client) {
       return res.json({ success: false, error: 'Circle SDK not configured', demo: true, balance: '0.00' });
     }
     try {
       // Circle SDK getWalletTokenBalance or listWallets with ID
-      const response = await client.listWallets({});
+      const response = await withTimeout<CircleSdkResult>(client.listWallets({}), CIRCLE_REQUEST_TIMEOUT_MS, 'Circle listWallets for balance');
       const wallet = (response.data?.wallets || []).find((w: any) => w.id === req.params.id);
       if (!wallet) return res.status(404).json({ success: false, error: 'Wallet not found' });
 
@@ -462,7 +539,11 @@ export function createApiApp() {
 
       return res.json({ success: true, balance, walletId: req.params.id, address: wallet.address });
     } catch (err: any) {
-      return res.json({ success: false, error: err?.message || 'Failed to get balance', balance: '0.00' });
+      const msg = err?.message || 'Failed to get balance';
+      if (isRecoverableCircleError(msg)) {
+        return res.json({ success: false, error: msg, demo: true, balance: '0.00' });
+      }
+      return res.json({ success: false, error: msg, balance: '0.00' });
     }
   });
 
@@ -545,6 +626,16 @@ export function createApiApp() {
     res.status(404).json({ success: false, error: "API Route Not Found" });
   });
 
+  // Global API error fallback to avoid Vercel HTML 500 pages reaching the client.
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) {
+      return next(err);
+    }
+    console.error('[API UNHANDLED]', err);
+    const message = err?.message || 'Unexpected server error';
+    return res.status(500).json({ success: false, error: message, demo: true });
+  });
+
   return app;
 }
 
@@ -554,6 +645,7 @@ async function startServer() {
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
