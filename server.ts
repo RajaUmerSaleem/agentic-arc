@@ -2,6 +2,7 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
+import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { v4 as uuidv4 } from 'uuid';
 import fetch from "node-fetch";
@@ -97,15 +98,42 @@ function isCircleSandboxKey(apiKey?: string): boolean {
   return key.startsWith('TEST_API_KEY:') || key.startsWith('TEST_') || key.startsWith('Q_');
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = parseInt(process.env.PORT || '3000', 10);
+function getRequestBaseUrl(req?: express.Request): string {
+  const configuredRaw = (process.env.APP_URL || '').trim();
+  const configured = configuredRaw.replace(/\/$/, '');
+  const looksLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(configured);
 
+  // Ignore localhost APP_URL in serverless/production deployments.
+  if (configured && !(process.env.VERCEL && looksLocalhost)) {
+    return configured;
+  }
+
+  if (req) {
+    const forwardedProtoHeader = req.headers['x-forwarded-proto'];
+    const forwardedHostHeader = req.headers['x-forwarded-host'];
+    const proto =
+      (Array.isArray(forwardedProtoHeader) ? forwardedProtoHeader[0] : forwardedProtoHeader)?.split(',')[0]?.trim() ||
+      req.protocol ||
+      'https';
+    const host =
+      (Array.isArray(forwardedHostHeader) ? forwardedHostHeader[0] : forwardedHostHeader)?.split(',')[0]?.trim() ||
+      req.get('host');
+    if (host) {
+      return `${proto}://${host}`;
+    }
+  }
+
+  return configured || 'http://localhost:3000';
+}
+
+export function createApiApp() {
+  const app = express();
+  app.set('trust proxy', true);
   app.use(express.json());
 
   // Health check for platform verification
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", uptime: process.uptime() });
+    res.json({ status: "ok", uptime: process.uptime(), appUrl: getRequestBaseUrl(req) });
   });
 
   // API routes
@@ -191,6 +219,7 @@ async function startServer() {
       balance,
       balanceDetails,
       balanceSource,
+      appUrl: getRequestBaseUrl(req),
       isAddressNotice: isAddress ? "WARNING: Your Wallet ID starts with 0x. Circle usually requires a UUID (e.g. 1000...) as the ID, not the address." : null,
       hasGemini: !!process.env.GEMINI_API_KEY,
       network: "Arc Layer-1 Testnet",
@@ -472,7 +501,7 @@ async function startServer() {
         };
 
         if (baseUrl.includes('openrouter')) {
-          headers['HTTP-Referer'] = req.headers.referer || 'http://localhost';
+          headers['HTTP-Referer'] = req.headers.referer || getRequestBaseUrl(req);
           headers['X-Title'] = 'Arc Agentic Swarm';
         }
 
@@ -516,6 +545,13 @@ async function startServer() {
     res.status(404).json({ success: false, error: "API Route Not Found" });
   });
 
+  return app;
+}
+
+async function startServer() {
+  const app = createApiApp();
+  const PORT = parseInt(process.env.PORT || '3000', 10);
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -541,4 +577,15 @@ async function startServer() {
   });
 }
 
-startServer();
+const isDirectExecution = (() => {
+  if (!process.argv[1]) return false;
+  const currentFilePath = fileURLToPath(import.meta.url);
+  return path.resolve(process.argv[1]) === path.resolve(currentFilePath);
+})();
+
+if (isDirectExecution) {
+  startServer().catch((err) => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}
