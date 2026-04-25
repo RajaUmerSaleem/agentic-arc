@@ -1,7 +1,6 @@
 import express from "express";
 import dotenv from "dotenv";
 import { v4 as uuidv4 } from 'uuid';
-import fetch from "node-fetch";
 
 dotenv.config();
 dotenv.config({ path: '.env.local', override: true });
@@ -19,6 +18,14 @@ type CircleSdkModule = {
 
 let circleSdkPromise: Promise<CircleSdkModule | null> | null = null;
 let circleSdkError: string | null = null;
+
+function safeAsync(
+  handler: (req: express.Request, res: express.Response, next: express.NextFunction) => Promise<unknown> | unknown
+): express.RequestHandler {
+  return (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -191,7 +198,7 @@ export function createApiApp() {
   });
 
   // API routes
-  app.get("/api/config", async (req, res) => {
+  app.get("/api/config", safeAsync(async (req, res) => {
     const walletId = (process.env.CIRCLE_WALLET_ID || process.env.CIRCLE_WALLET_ADDRESS || "PENDING_CONFIG");
     const isAddress = walletId.startsWith('0x');
     const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY?.trim() || '';
@@ -280,10 +287,10 @@ export function createApiApp() {
       status: environment === 'sandbox' ? 'Sandbox Mode' : (environment === 'production' ? 'Production Mode' : 'Unconfigured'),
       environment
     });
-  });
+  }));
 
   // API Proxy for Circle
-  app.post("/api/pay", async (req, res) => {
+  app.post("/api/pay", safeAsync(async (req, res) => {
     const { amount, recipientWallet, workerId } = req.body || {};
 
     const walletId = (process.env.CIRCLE_WALLET_ID || "").trim();
@@ -374,12 +381,12 @@ export function createApiApp() {
         details
       });
     }
-  });
+  }));
 
   // ── Circle SDK Wallet Management (from arc-engine integration) ──
 
   // Register entity secret ciphertext (one-time setup)
-  app.post("/api/register", async (req, res) => {
+  app.post("/api/register", safeAsync(async (req, res) => {
     const apiKey = process.env.CIRCLE_API_KEY?.trim() || '';
     const entitySecret = process.env.ENTITY_SECRET?.trim() || '';
     if (!apiKey || !entitySecret) {
@@ -412,10 +419,10 @@ export function createApiApp() {
       console.error('[REGISTER]', err);
       return res.status(500).json({ success: false, error: msg || 'Registration failed' });
     }
-  });
+  }));
 
   // List all wallets
-  app.get("/api/wallets", async (req, res) => {
+  app.get("/api/wallets", safeAsync(async (req, res) => {
     const client = await getCircleClient();
     if (!client) {
       // Client init failed or not configured — return demo mode gracefully
@@ -447,10 +454,10 @@ export function createApiApp() {
         info: 'Circle service temporarily unavailable. Showing demo mode to keep the app usable on Vercel.'
       });
     }
-  });
+  }));
 
   // Create wallet set + wallet (returns address for agent use)
-  app.post("/api/wallets", async (req, res) => {
+  app.post("/api/wallets", safeAsync(async (req, res) => {
     const client = await getCircleClient();
     const { name = 'Agent Wallet', blockchain = 'ETH-SEPOLIA', accountType = 'SCA' } = req.body;
     try {
@@ -494,10 +501,10 @@ export function createApiApp() {
       console.error('[WALLET CREATE]', err);
       return res.status(500).json({ success: false, error: msg || 'Wallet creation failed' });
     }
-  });
+  }));
 
   // Get wallet details by ID
-  app.get("/api/wallets/:id", async (req, res) => {
+  app.get("/api/wallets/:id", safeAsync(async (req, res) => {
     const client = await getCircleClient();
     if (!client) {
       return res.status(503).json({ success: false, error: 'Circle SDK not configured' });
@@ -514,10 +521,10 @@ export function createApiApp() {
       }
       return res.status(500).json({ success: false, error: msg });
     }
-  });
+  }));
 
   // Get wallet balance (USDC) by wallet ID
-  app.get("/api/wallets/:id/balance", async (req, res) => {
+  app.get("/api/wallets/:id/balance", safeAsync(async (req, res) => {
     const client = await getCircleClient();
     if (!client) {
       return res.json({ success: false, error: 'Circle SDK not configured', demo: true, balance: '0.00' });
@@ -542,10 +549,10 @@ export function createApiApp() {
       }
       return res.json({ success: false, error: msg, balance: '0.00' });
     }
-  });
+  }));
 
   // Proxy endpoint for fallback AI (OpenAI-compatible chat completions)
-  app.post("/api/chat", async (req, res) => {
+  app.post("/api/chat", safeAsync(async (req, res) => {
     const FALLBACK_API_KEY = process.env.FALLBACK_AI_API_KEY;
     const FALLBACK_BASE_URL = (process.env.FALLBACK_AI_BASE_URL || '').replace(/\/$/, '');
     const FALLBACK_MODEL = process.env.FALLBACK_AI_MODEL || 'gpt-3.5-turbo';
@@ -616,7 +623,7 @@ export function createApiApp() {
       success: false,
       error: "All fallback AI providers failed. Check your FALLBACK_AI_API_KEY and FALLBACK_AI_BASE_URL in .env.local",
     });
-  });
+  }));
 
   // Global 404 for API routes to prevent HTML fallout
   app.use("/api/*", (req, res) => {
