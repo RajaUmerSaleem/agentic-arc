@@ -1,15 +1,17 @@
-let appPromise: Promise<any> | null = null;
+import { createApiApp } from '../server';
 
-async function getApp() {
-	if (!appPromise) {
-		appPromise = import('../server').then((mod) => mod.createApiApp());
+let appInstance: any | null = null;
+
+function getApp() {
+	if (!appInstance) {
+		appInstance = createApiApp();
 	}
-	return appPromise;
+	return appInstance;
 }
 
-export default async function handler(req: any, res: any) {
+export default function handler(req: any, res: any) {
 	try {
-		const app = await getApp();
+		const app = getApp();
 		return app(req, res);
 	} catch (err: any) {
 		console.error('[Vercel API Bootstrap Error]', err);
