@@ -130,6 +130,21 @@ const loadStoredArray = <T,>(keys: string[], normalizer: (item: unknown) => T | 
   return [];
 };
 
+const parseApiJson = async <T = any>(response: Response, fallbackMessage: string): Promise<T> => {
+  const text = await response.text();
+
+  if (!text) {
+    throw new Error(`${fallbackMessage} (empty response)`);
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const compact = text.replace(/\s+/g, ' ').trim().slice(0, 120);
+    throw new Error(`${fallbackMessage}: ${compact || 'non-JSON response'}`);
+  }
+};
+
 export default function App() {
   const [task, setTask] = useState('');
   const [messages, setMessages] = useState<AgentMessage[]>(() =>
@@ -339,7 +354,7 @@ export default function App() {
   const fetchWalletBalance = async (walletId: string) => {
     try {
       const res = await fetch(`/api/wallets/${walletId}/balance`);
-      const data = await res.json();
+      const data = await parseApiJson<any>(res, `Failed to read wallet balance (HTTP ${res.status})`);
       if (data.success) {
         setWallets(prev => prev.map(w =>
           w.id === walletId ? { ...w, balance: data.balance } : w
@@ -355,7 +370,7 @@ export default function App() {
     setWalletError(null);
     try {
       const res = await fetch('/api/wallets');
-      const data = await res.json();
+      const data = await parseApiJson<any>(res, `Failed to load wallets (HTTP ${res.status})`);
       if (data.success) {
         const loadedWallets = data.wallets || [];
         setWallets(loadedWallets);
@@ -387,7 +402,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: 'Agent Wallet', blockchain: 'ETH-SEPOLIA', accountType: 'SCA' })
       });
-      const data = await res.json();
+      const data = await parseApiJson<any>(res, `Failed to create wallet (HTTP ${res.status})`);
       if (data.success && data.wallet) {
         setWallets(prev => [...prev, data.wallet]);
         if (data.demo) {
@@ -415,7 +430,7 @@ export default function App() {
     setWalletError(null);
     try {
       const res = await fetch('/api/register', { method: 'POST' });
-      const data = await res.json();
+      const data = await parseApiJson<any>(res, `Failed to register engine (HTTP ${res.status})`);
       if (data.success) {
         setEngineRegistered(true);
         addMessage('System', '✅ Circle engine registered! Save the recovery file from server logs.');
@@ -481,7 +496,7 @@ export default function App() {
         }),
       });
 
-      const data = await response.json();
+      const data = await parseApiJson<any>(response, `Fallback AI proxy returned non-JSON (HTTP ${response.status})`);
       if (!response.ok || !data.success) {
         return { text: '', success: false, error: data.error || `Server error (${response.status})` };
       }

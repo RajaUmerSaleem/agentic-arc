@@ -37,6 +37,20 @@ async function safeResponse(request, cacheResponsePromise) {
   } catch (e) {
     // ignore
   }
+
+  const url = new URL(request.url);
+
+  // Keep API failures JSON-shaped so clients using response.json() do not crash.
+  if (url.pathname.startsWith('/api/')) {
+    return new Response(
+      JSON.stringify({ success: false, error: 'Network error' }),
+      {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+  }
+
   // For navigation requests, serve index.html (SPA fallback)
   if (request.mode === 'navigate') {
     const cache = await caches.open(CACHE_NAME);
